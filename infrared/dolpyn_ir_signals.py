@@ -57,17 +57,14 @@ class RawIrSignal:
 
     def __str__(self):
         data = ' '.join(str(i) for i in self.data)
-        buf = ['#']
-        if self.comment:
-            buf.append(f'# {self.name} {self.comment}')
-        buf.extend([
+        return '\n'.join([
+            f'# {self.comment}'.rstrip(),
             f'name: {self.name}',
             'type: raw',
             f'frequency: {self.frequency}',
             f'duty_cycle: {self.duty_cycle:.2f}',
             f'data: {data}',
         ])
-        return '\n'.join(buf)
 
 
 class Rc5IrSignal:
@@ -94,6 +91,11 @@ class Rc5IrSignal:
 
     @classmethod
     def from_raw(cls, raw_ir_signal):
+        name = (
+            raw_ir_signal.name.rsplit(' ', 1)[0]
+            if raw_ir_signal.name.endswith(' (raw)')
+            else raw_ir_signal.name)
+
         bitstream = cls._durations_to_bitstream(
             raw_ir_signal.data, cls.HALF_BIT_DURATION)
 
@@ -101,7 +103,7 @@ class Rc5IrSignal:
         assert sum(rest) == 0 and len(rest) == 101, (len(rest), rest)
 
         numeric = cls._manchester_decode(half_bits_28)
-        return cls.from_numeric(raw_ir_signal.name, numeric)
+        return cls.from_numeric(name, numeric)
 
     @classmethod
     def from_numeric(cls, name, numeric):
@@ -111,7 +113,8 @@ class Rc5IrSignal:
         address = (numeric & 0x7C0) >> 6
         command = (((numeric & 0x1000) >> 6) ^ 0x40) | numeric & 0x3F
         return cls(
-            name, address, command, comment=cls._numeric_to_comment(numeric))
+            name, address, command,
+            comment=f'{name} {cls._numeric_to_comment(numeric)}')
 
     def __init__(self, name, address, command, comment=''):
         assert 0x00 <= address < 0x20, address
@@ -125,11 +128,13 @@ class Rc5IrSignal:
         numeric = self.to_numeric()
         assert numeric < 0x4000, hex(numeric)
         b = bin(numeric)[2:]
-        return f'[{self.address} {self.command}] {{{b[0:3]}-{b[3:8]}-{b[8:]}}}'
+        return (
+            f'{self.name} [{self.address} {self.command}] '
+            f'{{{b[0:3]}-{b[3:8]}-{b[8:]}}}')
 
     def as_raw(self):
         return RawIrSignal(
-            self.name + '-raw',
+            self.name + ' (raw)',
             36000,  # 36kHz
             0.25,   # 25% on, when on: ^___^___^___^___
             self._make_durations(),
@@ -219,17 +224,14 @@ class Rc5IrSignal:
 
     def __str__(self):
         assert self.protocol == 'RC5', self.protocol
-        buf = ['#']
-        if self.comment:
-            buf.append(f'# {self.name} {self.comment}')
-        buf.extend([
+        return '\n'.join([
+            f'# {self.comment}'.rstrip(),
             f'name: {self.name}',
             'type: parsed',
             f'protocol: {self.protocol}',
             f'address: {self.address:02X} 00 00 00',
             f'command: {self.command:02X} 00 00 00',
         ])
-        return '\n'.join(buf)
 
 
 class Rc5MarantzIrSignal(Rc5IrSignal):
@@ -268,6 +270,11 @@ class Rc5MarantzIrSignal(Rc5IrSignal):
     @classmethod
     def from_raw(cls, raw_ir_signal):
         "Allow both RC5marantz and RC5 signals to be picked up here"
+        name = (
+            raw_ir_signal.name.rsplit(' ', 1)[0]
+            if raw_ir_signal.name.endswith(' (raw)')
+            else raw_ir_signal.name)
+
         bitstream = cls._durations_to_bitstream(
             raw_ir_signal.data, cls.HALF_BIT_DURATION)
 
@@ -278,12 +285,12 @@ class Rc5MarantzIrSignal(Rc5IrSignal):
             numeric = (
                 cls._manchester_decode(half_bits_16) << 12 |
                 cls._manchester_decode(half_bits_24))
-            return cls.from_numeric(raw_ir_signal.name, numeric)
+            return cls.from_numeric(name, numeric)
         else:
             half_bits_28, rest = bitstream[0:28], bitstream[28:]
             assert sum(rest) == 0 and len(rest) == 101, (len(rest), rest)
             numeric = cls._manchester_decode(half_bits_28)
-            return Rc5IrSignal.from_numeric(raw_ir_signal.name, numeric)
+            return Rc5IrSignal.from_numeric(name, numeric)
 
     @classmethod
     def from_numeric(cls, name, numeric):
@@ -293,39 +300,40 @@ class Rc5MarantzIrSignal(Rc5IrSignal):
         address = (numeric & 0x1F000) >> 12
         command = (
             (((numeric & 0x40000) >> 6) ^ 0x1000) | numeric & 0xFC0) >> 6
-        ext = numeric & 0x3F
+        extension = numeric & 0x3F
         return cls(
-            name, address, command, ext,
-            comment=cls._numeric_to_comment(numeric))
+            name, address, command, extension,
+            comment=f'{name} {cls._numeric_to_comment(numeric)}')
 
-    def __init__(self, name, address, command, ext, comment=''):
+    def __init__(self, name, address, command, extension, comment=''):
         super().__init__(name, address, command, comment)
-        assert 0x00 <= ext < 0x40, ext
-        self.ext = ext
+        assert 0x00 <= extension < 0x40, extension
+        self.extension = extension
 
     def as_comment(self):
         numeric = self.to_numeric()
         assert numeric < 0x100000, hex(numeric)
         b = bin(numeric)[2:]
         return (
-            f'[{self.address} {self.command} {self.ext}] '
+            f'{self.name} [{self.address} {self.command} {self.extension}] '
             f'{{{b[0:3]}-{b[3:8]}--{b[8:14]}-{b[14:]}}}')
 
     def to_numeric(self):
         assert self.protocol == 'RC5marantz', self.protocol
         numeric = (
-            # SCFAAAAACCCCCCEEEEEE (with two wait bits afte bit 8)
+            # SCFAAAAACCCCCCEEEEEE (with two wait bits after bit 8)
             # 43210fedcba987654321 (20-bits)
             0b10000000000000000000 |  # start
             (0b1000000000000000000 if self.command < 0x40 else 0) |
             (0b0100000000000000000 if False else 0) |  # first press
             self.address << 12 |
             (self.command & 0x3F) << 6 |
-            self.ext)
+            self.extension)
         return numeric
 
     def _manchester_to_durations(self, manchester, half_bit_duration):
         assert self.protocol == 'RC5marantz', self.protocol
+
         ret = [half_bit_duration]  # ON
         last = 1
         for idx, value in enumerate(manchester[1:]):
@@ -348,17 +356,14 @@ class Rc5MarantzIrSignal(Rc5IrSignal):
 
     def __str__(self):
         assert self.protocol == 'RC5marantz', self.protocol
-        buf = ['#']
-        if self.comment:
-            buf.append(f'# {self.name} {self.comment}')
-        buf.extend([
+        return '\n'.join([
+            f'# {self.comment}'.rstrip(),
             f'name: {self.name}',
             'type: parsed',
             f'protocol: {self.protocol}',
             f'address: {self.address:02X} 00 00 00',
-            f'command: {self.command:02X} {self.ext:02X} 00 00',
+            f'command: {self.command:02X} {self.extension:02X} 00 00',
         ])
-        return '\n'.join(buf)
 
 
 if __name__ == '__main__':
