@@ -367,6 +367,82 @@ class Rc5MarantzIrSignal(Rc5IrSignal):
         ])
 
 
+class IrFile:
+    @classmethod
+    def parse(cls, fp):
+        for item in cls._ir_keys_to_signals(
+                cls._ir_file_to_keys(fp)):
+            yield item
+
+    @classmethod
+    def _ir_file_to_keys(cls, line_iter):
+        kvs = []
+        comment = None
+        for line in line_iter:
+            if line.startswith('#'):
+                if kvs:
+                    yield (comment, kvs)
+                    kvs = []
+                elif comment is not None:
+                    yield comment
+                comment = line
+            else:
+                if line.startswith('name: ') and kvs:
+                    yield (comment, kvs)
+                    comment = None
+                    kvs = []
+                if line.startswith('name: '):
+                    kvs.append(line)
+                elif not (kvs and ': ' in line):
+                    if comment:
+                        yield comment
+                        comment = None
+                    yield line
+                else:
+                    kvs.append(line)
+        if kvs:
+            yield (comment, kvs)
+
+    @classmethod
+    def _ir_keys_to_signals(cls, it):
+        for data in it:
+            if isinstance(data, str):
+                yield data
+            else:
+                comment, kvs = data
+                if comment is None:
+                    comment = ''
+                comment = comment[1:].strip()
+                yield cls._make_ir_signal(kvs, comment)
+
+    @classmethod
+    def _make_ir_signal(cls, kvs, comment):
+        kvs = dict([i.strip() for i in k.split(': ', 1)] for k in kvs)
+        if kvs['type'] == 'raw':
+            return RawIrSignal(
+                name=kvs['name'], frequency=int(kvs['frequency']),
+                duty_cycle=float(kvs['duty_cycle']),
+                data=[int(i) for i in kvs['data'].split()],
+                comment=comment)
+        elif kvs['type'] == 'parsed' and kvs['protocol'] == 'RC5':
+            assert len(kvs) == 5, kvs
+            address = int(kvs['address'].split(' ', 1)[0], 16)
+            command = int(kvs['command'].split(' ', 1)[0], 16)
+            return Rc5IrSignal(
+                name=kvs['name'], address=address, command=command,
+                comment=comment)
+        elif kvs['type'] == 'parsed' and kvs['protocol'] == 'RC5marantz':
+            assert len(kvs) == 5, kvs
+            address = int(kvs['address'].split(' ', 1)[0], 16)
+            command = int(kvs['command'].split(' ', 1)[0], 16)
+            extension = int(kvs['command'].split(' ', 2)[1], 16)
+            return Rc5MarantzIrSignal(
+                name=kvs['name'], address=address, command=command,
+                extension=extension, comment=comment)
+        else:
+            raise NotImplementedError(kvs)
+
+
 if __name__ == '__main__':
     print('Filetype: IR signals file\nVersion: 1')
 
