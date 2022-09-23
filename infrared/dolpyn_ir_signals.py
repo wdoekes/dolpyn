@@ -334,11 +334,12 @@ class Rc5MarantzIrSignal(Rc5IrSignal):
     def _manchester_to_durations(self, manchester, half_bit_duration):
         assert self.protocol == 'RC5marantz', self.protocol
 
-        ret = [half_bit_duration]  # ON
+        ret = [half_bit_duration]  # ON, this is at half-bit 2 already
         last = 1
-        for idx, value in enumerate(manchester[1:]):
-            # For RC5marantz we add 4 half bits of silence after half-bit 16.
-            if idx == 15:
+        for one_based_half_bits, value in enumerate(manchester[1:], 3):
+            # For RC5marantz we add 4 half bits of silence before
+            # half-bit 17 (before whole-bit 9).
+            if one_based_half_bits == 17:
                 if last == 0:
                     ret[-1] += 4 * self.HALF_BIT_DURATION
                 else:
