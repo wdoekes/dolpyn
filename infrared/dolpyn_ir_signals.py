@@ -5,6 +5,8 @@ dolpyn/infrared/ir_signals -- process Flipper Zero infrared files
 Author: Walter Doekes, 2022
 Useful info here: https://blog.flipperzero.one/infrared/
 """
+import unittest
+from warnings import warn
 
 
 class RawIrSignal:
@@ -100,7 +102,7 @@ class Rc5IrSignal:
             raw_ir_signal.data, cls.HALF_BIT_DURATION)
 
         half_bits_28, rest = bitstream[0:28], bitstream[28:]
-        assert sum(rest) == 0 and len(rest) == 101, (len(rest), rest)
+        assert sum(rest) == 0 and len(rest) in (100, 101), (len(rest), rest)
 
         numeric = cls._manchester_decode(half_bits_28)
         return cls.from_numeric(name, numeric)
@@ -288,7 +290,7 @@ class Rc5MarantzIrSignal(Rc5IrSignal):
             return cls.from_numeric(name, numeric)
         else:
             half_bits_28, rest = bitstream[0:28], bitstream[28:]
-            assert sum(rest) == 0 and len(rest) == 101, (len(rest), rest)
+            assert sum(rest) == 0 and len(rest) in (100, 101), (len(rest), rest)
             numeric = cls._manchester_decode(half_bits_28)
             return Rc5IrSignal.from_numeric(name, numeric)
 
@@ -370,54 +372,68 @@ class Rc5MarantzIrSignal(Rc5IrSignal):
 class IrFile:
     @classmethod
     def parse(cls, fp):
-        for item in cls._ir_keys_to_signals(
-                cls._ir_file_to_keys(fp)):
+        for item in cls._ir_records_to_signals(
+                cls._ir_file_to_records(fp)):
             yield item
 
     @classmethod
-    def _ir_file_to_keys(cls, line_iter):
-        kvs = []
-        comment = None
+    def _ir_file_to_records(cls, line_iter):
+        record = None
+        prev_line = None
         for line in line_iter:
-            if line.startswith('#'):
-                if kvs:
-                    yield (comment, kvs)
-                    kvs = []
-                elif comment is not None:
-                    yield comment
-                comment = line
+            if line.startswith('name: '):
+                if record is not None:
+                    if prev_line and not prev_line.startswith('#'):
+                        record.append(prev_line)
+                        prev_line = None
+                    yield record  # record
+                record = []
+                if prev_line:
+                    record.append(prev_line)
+            elif record is not None:
+                if prev_line:
+                    record.append(prev_line)
+                if line.startswith('#'):
+                    yield record  # record
+                    record = None
+            elif prev_line:
+                yield prev_line  # string
+            prev_line = line
+
+        if record:
+            if prev_line:
+                record.append(prev_line)
+            yield record  # record
+        elif prev_line:
+            yield prev_line  # string
+
+    @classmethod
+    def _ir_records_to_signals(cls, it):
+        for string_or_record in it:
+            if isinstance(string_or_record, str):
+                yield None, string_or_record
             else:
-                if line.startswith('name: ') and kvs:
-                    yield (comment, kvs)
-                    comment = None
-                    kvs = []
-                if line.startswith('name: '):
-                    kvs.append(line)
-                elif not (kvs and ': ' in line):
-                    if comment:
-                        yield comment
-                        comment = None
-                    yield line
+                try:
+                    signal = cls._record_to_signal(string_or_record)
+                except AssertionError as exc:
+                    yield exc, ''.join(string_or_record)
                 else:
-                    kvs.append(line)
-        if kvs:
-            yield (comment, kvs)
+                    yield signal, ''.join(string_or_record)
 
     @classmethod
-    def _ir_keys_to_signals(cls, it):
-        for data in it:
-            if isinstance(data, str):
-                yield data
-            else:
-                comment, kvs = data
-                if comment is None:
-                    comment = ''
-                comment = comment[1:].strip()
-                yield cls._make_ir_signal(kvs, comment)
+    def _record_to_signal(cls, record):
+        if record[0].startswith('#'):
+            comment = record[0][1:].strip()
+            skip = 1
+        else:
+            comment = ''
+            skip = 0
+        kvs = dict(
+            [i.strip() for i in k.split(': ', 1)] for k in record[skip:])
+        return cls._kvs_to_signal(kvs, comment)
 
     @classmethod
-    def _make_ir_signal(cls, kvs, comment):
-        kvs = dict([i.strip() for i in k.split(': ', 1)] for k in kvs)
+    def _kvs_to_signal(cls, kvs, comment):
         if kvs['type'] == 'raw':
             return RawIrSignal(
                 name=kvs['name'], frequency=int(kvs['frequency']),
@@ -443,7 +459,52 @@ class IrFile:
             raise NotImplementedError(kvs)
 
 
+class IrFileTestCase(unittest.TestCase):
+    def test_ir_file_to_records(self):
+        from io import StringIO
+
+        out = list(IrFile._ir_file_to_records(StringIO('''\
+Filetype: IR signals file
+Version: 1
+#
+name: TV_POWER
+type: parsed
+protocol: RC5
+address: 17 00 00 00
+command: 06 00 00 00
+#
+# POWER [raw] {11000101-001100}
+name: POWER
+type: parsed
+protocol: RC5
+address: 05 00 00 00
+command: 0C 00 00 00
+''')))
+        self.assertEqual(out, [
+            'Filetype: IR signals file\n',
+            'Version: 1\n',
+            ['#\n',
+             'name: TV_POWER\n',
+             'type: parsed\n',
+             'protocol: RC5\n',
+             'address: 17 00 00 00\n',
+             'command: 06 00 00 00\n'],
+            '#\n',
+            ['# POWER [raw] {11000101-001100}\n',
+             'name: POWER\n',
+             'type: parsed\n',
+             'protocol: RC5\n',
+             'address: 05 00 00 00\n',
+             'command: 0C 00 00 00\n']])
+
+
 if __name__ == '__main__':
+    import os
+
+    if os.environ.get('TEST', '0') == '1':
+        unittest.main()
+        assert False, 'should not get here'
+
     print('Filetype: IR signals file\nVersion: 1')
 
     # Example:
